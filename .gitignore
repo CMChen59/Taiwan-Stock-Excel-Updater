@@ -1,0 +1,18 @@
+# Python & PyInstaller
+__pycache__/
+*.py[cod]
+build/
+dist/
+*.spec
+
+# Runtime Logs
+*.log
+
+# Executables
+*.exe
+
+# Personal Excel Files & Temp Locks
+*.xlsm
+*.xlsx
+*.xls
+~$*
