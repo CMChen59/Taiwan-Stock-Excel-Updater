@@ -43,6 +43,27 @@ logger.addHandler(console_handler)
 if hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(line_buffering=True)
 
+import ssl
+
+def safe_save_wb(wb):
+    for attempt in range(5):
+        try:
+            wb.Save()
+            return
+        except Exception as e:
+            if attempt < 4:
+                time.sleep(0.5)
+            else:
+                raise
+
+def safe_close_wb(wb, save_changes=False):
+    for attempt in range(5):
+        try:
+            wb.Close(save_changes)
+            return
+        except Exception:
+            time.sleep(0.3)
+
 def safe_com_call(func, max_retries=5, delay=0.3):
     for attempt in range(max_retries):
         try:
@@ -76,8 +97,9 @@ def fetch_stock_data(tickers):
     )
     
     stock_dict = {}
+    ssl_context = ssl._create_unverified_context()
     try:
-        with urllib.request.urlopen(req, timeout=10) as response:
+        with urllib.request.urlopen(req, timeout=10, context=ssl_context) as response:
             content = response.read().decode('utf-8')
             data = json.loads(content)
             
@@ -135,6 +157,7 @@ def fetch_stock_data(tickers):
     return stock_dict
 
 def fetch_yahoo_fallback(ticker):
+    ssl_context = ssl._create_unverified_context()
     ticker_clean = str(ticker).strip().zfill(4 if len(str(ticker).strip()) <= 4 else len(str(ticker).strip()))
     suffix_list = ['.TW', '.TWO']
     
@@ -146,7 +169,7 @@ def fetch_yahoo_fallback(ticker):
             headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
         )
         try:
-            with urllib.request.urlopen(req, timeout=5) as resp:
+            with urllib.request.urlopen(req, timeout=5, context=ssl_context) as resp:
                 data = json.loads(resp.read().decode('utf-8'))
                 result = data.get('chart', {}).get('result', [])
                 if result:
@@ -196,11 +219,12 @@ def find_target_excel_files(directory):
 
 def get_excel_app():
     try:
-        app = win32com.client.GetActiveObject("Excel.Application")
+        raw_app = win32com.client.GetActiveObject("Excel.Application")
+        app = win32com.client.gencache.EnsureDispatch(raw_app)
         logger.info("已附加連線至現有運作中之 Excel.Application 實例")
         return app, False
     except Exception:
-        app = win32com.client.Dispatch("Excel.Application")
+        app = win32com.client.gencache.EnsureDispatch("Excel.Application")
         app.Visible = False
         app.DisplayAlerts = False
         app.ScreenUpdating = False
@@ -292,19 +316,16 @@ def update_excel_file_com(excel_app, file_path, stock_data_dict):
             except Exception:
                 pass
 
-        safe_com_call(lambda: wb.Save())
+        safe_save_wb(wb)
         if not is_already_open:
-            safe_com_call(lambda: wb.Close(False))
+            safe_close_wb(wb, False)
         logger.info(f"  └ [成功] 檔案 {fname} 已完成 {updated_count} 支股票數據寫入與存檔！")
         return True
     except Exception as e:
         logger.error(f"  └ [錯誤] 檔案 {fname} 更新失敗: {e}")
         logger.error(traceback.format_exc())
         if wb and not is_already_open:
-            try:
-                safe_com_call(lambda: wb.Close(False))
-            except Exception:
-                pass
+            safe_close_wb(wb, False)
         return False
 
 def collect_all_tickers(target_files):

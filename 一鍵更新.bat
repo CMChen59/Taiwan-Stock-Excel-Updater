@@ -3,7 +3,7 @@ chcp 65001 >nul
 title 台灣股票收盤價 Excel 自動更新工具
 cd /d "%~dp0"
 
-"C:\Users\CM\AppData\Local\Programs\Python\Python312\python.exe" update_stocks.py %*
+python update_stocks.py %*
 
 if errorlevel 1 (
     echo.
