@@ -12,6 +12,7 @@ import sys
 import glob
 import json
 import time
+import shutil
 import logging
 import traceback
 import urllib.request
@@ -217,19 +218,55 @@ def find_target_excel_files(directory):
             
     return target_files
 
-def get_excel_app():
+def clear_gen_py():
     try:
-        raw_app = win32com.client.GetActiveObject("Excel.Application")
-        app = win32com.client.gencache.EnsureDispatch(raw_app)
-        logger.info("已附加連線至現有運作中之 Excel.Application 實例")
-        return app, False
-    except Exception:
-        app = win32com.client.gencache.EnsureDispatch("Excel.Application")
-        app.Visible = False
-        app.DisplayAlerts = False
-        app.ScreenUpdating = False
-        logger.info("已建立全新背景 Excel.Application COM 實例")
-        return app, True
+        import win32com.client.gencache
+        for mod_name in list(sys.modules.keys()):
+            if "win32com.gen_py" in mod_name:
+                del sys.modules[mod_name]
+        gen_py_dir = win32com.client.gencache.GetGeneratePath()
+        if gen_py_dir and os.path.exists(gen_py_dir):
+            shutil.rmtree(gen_py_dir, ignore_errors=True)
+            logger.info(f"已自動清除損壞之 pywin32 快取目錄: {gen_py_dir}")
+    except Exception as e:
+        logger.warning(f"清理 gen_py 快取時發生例外: {e}")
+
+def get_excel_app():
+    for attempt in range(2):
+        try:
+            try:
+                raw_app = win32com.client.GetActiveObject("Excel.Application")
+                app = win32com.client.gencache.EnsureDispatch(raw_app)
+                logger.info("已附加連線至現有運作中之 Excel.Application 實例 (EnsureDispatch)")
+                return app, False
+            except Exception:
+                app = win32com.client.gencache.EnsureDispatch("Excel.Application")
+                app.Visible = False
+                app.DisplayAlerts = False
+                app.ScreenUpdating = False
+                logger.info("已建立全新背景 Excel.Application COM 實例 (EnsureDispatch)")
+                return app, True
+        except (AttributeError, Exception) as e:
+            logger.warning(f"win32com gencache 發生例外 ({e})，正在嘗試清除 gen_py 重置快取...")
+            clear_gen_py()
+
+    try:
+        import win32com.client.dynamic
+        try:
+            raw_app = win32com.client.GetActiveObject("Excel.Application")
+            app = win32com.client.dynamic.Dispatch(raw_app)
+            logger.info("已附加連線至現有運作中之 Excel.Application 實例 (Dynamic Dispatch 備援)")
+            return app, False
+        except Exception:
+            app = win32com.client.dynamic.Dispatch("Excel.Application")
+            app.Visible = False
+            app.DisplayAlerts = False
+            app.ScreenUpdating = False
+            logger.info("已建立全新背景 Excel.Application COM 實例 (Dynamic Dispatch 備援)")
+            return app, True
+    except Exception as e:
+        logger.error(f"建立或連線 Excel.Application COM 實例完全失敗: {e}")
+        raise
 
 def update_excel_file_com(excel_app, file_path, stock_data_dict):
     fname = os.path.basename(file_path)
@@ -407,9 +444,11 @@ def main():
     elapsed = time.time() - start_time
     logger.info(f"  └─ API 數據抓取完成！耗時: {elapsed:.2f} 秒")
 
-    excel_app, is_newly_created = get_excel_app()
+    excel_app = None
+    is_newly_created = False
 
     try:
+        excel_app, is_newly_created = get_excel_app()
         logger.info("[步驟 2/2] 正在經由 Excel 原生引擎寫入儲存格 (100% 原生保留圖片與公式)...")
         success_count = 0
         for fpath in selected_files:
@@ -423,7 +462,7 @@ def main():
         logger.critical(f"全局執行發生嚴重例外錯誤: {global_e}")
         logger.critical(traceback.format_exc())
     finally:
-        if is_newly_created:
+        if excel_app and is_newly_created:
             try:
                 safe_com_call(lambda: excel_app.Quit())
             except Exception:
