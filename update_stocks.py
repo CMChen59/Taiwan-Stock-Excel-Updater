@@ -18,6 +18,8 @@ import traceback
 import urllib.request
 from datetime import datetime
 import win32com.client
+import win32com.client.gencache
+import win32com.client.dynamic
 
 if getattr(sys, 'frozen', False):
     SCRIPT_DIR = os.path.dirname(sys.executable)
@@ -251,7 +253,6 @@ def get_excel_app():
             clear_gen_py()
 
     try:
-        import win32com.client.dynamic
         try:
             raw_app = win32com.client.GetActiveObject("Excel.Application")
             app = win32com.client.dynamic.Dispatch(raw_app)
