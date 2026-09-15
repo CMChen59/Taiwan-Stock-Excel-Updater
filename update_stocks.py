@@ -21,6 +21,8 @@ import win32com.client
 import win32com.client.gencache
 import win32com.client.dynamic
 
+VERSION = "v1.0.1"
+
 if getattr(sys, 'frozen', False):
     SCRIPT_DIR = os.path.dirname(sys.executable)
 else:
@@ -390,7 +392,7 @@ def collect_all_tickers(target_files):
 
 def main():
     logger.info("======================================================================")
-    logger.info("      台灣股票收盤價 Excel 自動更新工具 (Excel Native COM 引擎)")
+    logger.info(f"    台灣股票收盤價 Excel 自動更新工具 {VERSION} (Excel Native COM 引擎)")
     logger.info("======================================================================")
     logger.info(f"Log 記錄檔位置: {LOG_FILE}")
     
