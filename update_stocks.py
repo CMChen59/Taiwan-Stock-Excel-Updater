@@ -21,7 +21,7 @@ import win32com.client
 import win32com.client.gencache
 import win32com.client.dynamic
 
-VERSION = "v1.0.1"
+VERSION = "v1.0.2"
 
 if getattr(sys, 'frozen', False):
     SCRIPT_DIR = os.path.dirname(sys.executable)
@@ -68,6 +68,24 @@ def safe_close_wb(wb, save_changes=False):
             return
         except Exception:
             time.sleep(0.3)
+
+def is_rpc_or_disconnect_error(err):
+    err_str = str(err).lower()
+    rpc_codes = [
+        "-2147023174",
+        "-2147023170",
+        "-2147417848",
+        "-2147023179",
+        "800706ba",
+        "800706be",
+        "80010108"
+    ]
+    for code in rpc_codes:
+        if code in err_str:
+            return True
+    if "rpc" in err_str or "disconnected" in err_str or "無法使用" in str(err):
+        return True
+    return False
 
 def safe_com_call(func, max_retries=5, delay=0.3):
     for attempt in range(max_retries):
@@ -235,41 +253,53 @@ def clear_gen_py():
     except Exception as e:
         logger.warning(f"清理 gen_py 快取時發生例外: {e}")
 
-def get_excel_app():
-    for attempt in range(2):
+def get_excel_app(force_new=False):
+    if not force_new:
+        for attempt in range(2):
+            try:
+                try:
+                    raw_app = win32com.client.GetActiveObject("Excel.Application")
+                    app = win32com.client.gencache.EnsureDispatch(raw_app)
+                    logger.info("已附加連線至現有運作中之 Excel.Application 實例 (EnsureDispatch)")
+                    return app, False
+                except Exception:
+                    app = win32com.client.gencache.EnsureDispatch("Excel.Application")
+                    app.Visible = False
+                    app.DisplayAlerts = False
+                    app.ScreenUpdating = False
+                    logger.info("已建立全新背景 Excel.Application COM 實例 (EnsureDispatch)")
+                    return app, True
+            except (AttributeError, Exception) as e:
+                logger.warning(f"win32com gencache 發生例外 ({e})，正在嘗試清除 gen_py 重置快取...")
+                clear_gen_py()
+
         try:
             try:
                 raw_app = win32com.client.GetActiveObject("Excel.Application")
-                app = win32com.client.gencache.EnsureDispatch(raw_app)
-                logger.info("已附加連線至現有運作中之 Excel.Application 實例 (EnsureDispatch)")
+                app = win32com.client.dynamic.Dispatch(raw_app)
+                logger.info("已附加連線至現有運作中之 Excel.Application 實例 (Dynamic Dispatch 備援)")
                 return app, False
             except Exception:
-                app = win32com.client.gencache.EnsureDispatch("Excel.Application")
+                app = win32com.client.dynamic.Dispatch("Excel.Application")
                 app.Visible = False
                 app.DisplayAlerts = False
                 app.ScreenUpdating = False
-                logger.info("已建立全新背景 Excel.Application COM 實例 (EnsureDispatch)")
+                logger.info("已建立全新背景 Excel.Application COM 實例 (Dynamic Dispatch 備援)")
                 return app, True
-        except (AttributeError, Exception) as e:
-            logger.warning(f"win32com gencache 發生例外 ({e})，正在嘗試清除 gen_py 重置快取...")
-            clear_gen_py()
+        except Exception as e:
+            logger.error(f"建立或連線 Excel.Application COM 實例完全失敗: {e}")
+            raise
 
+    # 強制啟動全新背景實例
     try:
-        try:
-            raw_app = win32com.client.GetActiveObject("Excel.Application")
-            app = win32com.client.dynamic.Dispatch(raw_app)
-            logger.info("已附加連線至現有運作中之 Excel.Application 實例 (Dynamic Dispatch 備援)")
-            return app, False
-        except Exception:
-            app = win32com.client.dynamic.Dispatch("Excel.Application")
-            app.Visible = False
-            app.DisplayAlerts = False
-            app.ScreenUpdating = False
-            logger.info("已建立全新背景 Excel.Application COM 實例 (Dynamic Dispatch 備援)")
-            return app, True
-    except Exception as e:
-        logger.error(f"建立或連線 Excel.Application COM 實例完全失敗: {e}")
-        raise
+        app = win32com.client.gencache.EnsureDispatch("Excel.Application")
+    except Exception:
+        app = win32com.client.dynamic.Dispatch("Excel.Application")
+    app.Visible = False
+    app.DisplayAlerts = False
+    app.ScreenUpdating = False
+    logger.info("已重新啟動全新獨立背景 Excel.Application COM 實例")
+    return app, True
 
 def update_excel_file_com(excel_app, file_path, stock_data_dict):
     fname = os.path.basename(file_path)
@@ -286,7 +316,9 @@ def update_excel_file_com(excel_app, file_path, stock_data_dict):
                     is_already_open = True
                     logger.info(f"  └ 檔案 {fname} 目前已在 Excel 中開啟，將進行現場即時寫入")
                     break
-        except Exception:
+        except Exception as e:
+            if is_rpc_or_disconnect_error(e):
+                raise
             pass
 
         if not wb:
@@ -297,7 +329,9 @@ def update_excel_file_com(excel_app, file_path, stock_data_dict):
         try:
             old_calc = excel_app.Calculation
             excel_app.Calculation = -4135 # xlCalculationManual
-        except Exception:
+        except Exception as e:
+            if is_rpc_or_disconnect_error(e):
+                raise
             pass
 
         ws = None
@@ -309,8 +343,8 @@ def update_excel_file_com(excel_app, file_path, stock_data_dict):
         if not ws:
             logger.warning(f"  └ [跳過] 檔案 {fname} 內找不到 '一覽表' 工作表")
             if not is_already_open:
-                safe_com_call(lambda: wb.Close(False))
-            return False
+                safe_close_wb(wb, False)
+            return True, excel_app
 
         now_str = datetime.now().strftime("%Y/%m/%d %H:%M:%S")
         safe_com_call(lambda: ws.Cells(3, 2).__setattr__('Value', f"※更新時間：{now_str}"))
@@ -353,20 +387,46 @@ def update_excel_file_com(excel_app, file_path, stock_data_dict):
         if old_calc is not None:
             try:
                 excel_app.Calculation = old_calc
-            except Exception:
+            except Exception as e:
+                if is_rpc_or_disconnect_error(e):
+                    raise
                 pass
 
         safe_save_wb(wb)
         if not is_already_open:
             safe_close_wb(wb, False)
         logger.info(f"  └ [成功] 檔案 {fname} 已完成 {updated_count} 支股票數據寫入與存檔！")
-        return True
+        return True, excel_app
     except Exception as e:
+        if is_rpc_or_disconnect_error(e):
+            raise
         logger.error(f"  └ [錯誤] 檔案 {fname} 更新失敗: {e}")
         logger.error(traceback.format_exc())
         if wb and not is_already_open:
             safe_close_wb(wb, False)
-        return False
+        return False, excel_app
+
+def update_excel_file_with_retry(excel_app, file_path, stock_data_dict, max_retries=2):
+    current_app = excel_app
+    for attempt in range(max_retries):
+        try:
+            return update_excel_file_com(current_app, file_path, stock_data_dict)
+        except Exception as e:
+            if is_rpc_or_disconnect_error(e) and attempt < max_retries - 1:
+                logger.warning(f"  └ [RPC/斷線異常] 偵測到 Excel 通訊中斷 ({e})，正在自動重啟 Excel 引擎進行修復重試...")
+                time.sleep(1.0)
+                try:
+                    new_app, _ = get_excel_app(force_new=True)
+                    current_app = new_app
+                except Exception as restart_err:
+                    logger.error(f"  └ 重啟 Excel 實例失敗: {restart_err}")
+                    return False, current_app
+            else:
+                fname = os.path.basename(file_path)
+                logger.error(f"  └ [錯誤] 檔案 {fname} 更新失敗: {e}")
+                logger.error(traceback.format_exc())
+                return False, current_app
+    return False, current_app
 
 def collect_all_tickers(target_files):
     import openpyxl
@@ -455,7 +515,8 @@ def main():
         logger.info("[步驟 2/2] 正在經由 Excel 原生引擎寫入儲存格 (100% 原生保留圖片與公式)...")
         success_count = 0
         for fpath in selected_files:
-            if update_excel_file_com(excel_app, fpath, stock_data):
+            success, excel_app = update_excel_file_with_retry(excel_app, fpath, stock_data)
+            if success:
                 success_count += 1
                 
         logger.info("======================================================================")
