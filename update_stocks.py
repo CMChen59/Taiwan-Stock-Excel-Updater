@@ -21,7 +21,7 @@ import win32com.client
 import win32com.client.gencache
 import win32com.client.dynamic
 
-VERSION = "v1.0.2"
+VERSION = "v1.0.3"
 
 if getattr(sys, 'frozen', False):
     SCRIPT_DIR = os.path.dirname(sys.executable)
@@ -335,10 +335,18 @@ def update_excel_file_com(excel_app, file_path, stock_data_dict):
             pass
 
         ws = None
-        for sheet in wb.Sheets:
-            if sheet.Name == "一覽表":
-                ws = sheet
-                break
+        try:
+            ws = safe_com_call(lambda: wb.Sheets("一覽表"))
+        except Exception:
+            try:
+                sheet_count = safe_com_call(lambda: wb.Sheets.Count)
+                for idx in range(1, sheet_count + 1):
+                    s = safe_com_call(lambda: wb.Sheets(idx))
+                    if s.Name == "一覽表":
+                        ws = s
+                        break
+            except Exception:
+                pass
                 
         if not ws:
             logger.warning(f"  └ [跳過] 檔案 {fname} 內找不到 '一覽表' 工作表")
@@ -428,11 +436,27 @@ def update_excel_file_with_retry(excel_app, file_path, stock_data_dict, max_retr
                 return False, current_app
     return False, current_app
 
-def collect_all_tickers(target_files):
-    import openpyxl
+def extract_tickers_from_sheet(ws):
     tickers = set()
+    for r in range(5, 51):
+        val = safe_com_call(lambda: ws.Cells(r, 3).Value)
+        if val is not None:
+            val_str = str(val).strip()
+            if val_str.endswith('.0'):
+                val_str = val_str[:-2]
+            if val_str.isdigit():
+                val_str = val_str.zfill(4 if len(val_str) <= 4 else len(val_str))
+                tickers.add(val_str)
+    return tickers
+
+def collect_all_tickers(target_files, excel_app=None):
+    tickers = set()
+    unprocessed_files = []
+
+    # 優先嘗試 openpyxl 快速收集
     for fpath in target_files:
         try:
+            import openpyxl
             wb = openpyxl.load_workbook(fpath, read_only=True)
             if "一覽表" in wb.sheetnames:
                 ws = wb["一覽表"]
@@ -447,7 +471,52 @@ def collect_all_tickers(target_files):
                             tickers.add(val_str)
             wb.close()
         except Exception as e:
-            logger.warning(f"讀取 {os.path.basename(fpath)} 股票代號時發生錯誤: {e}")
+            # openpyxl 無法讀取時（如受保護/非標準 ZIP 格式），排入 Excel 原生引擎備援
+            unprocessed_files.append(fpath)
+
+    # 針對 openpyxl 無法讀取的檔案，使用 Excel COM 原生引擎讀取
+    if unprocessed_files and excel_app:
+        for fpath in unprocessed_files:
+            fname = os.path.basename(fpath)
+            wb = None
+            is_already_open = False
+            try:
+                try:
+                    for open_wb in excel_app.Workbooks:
+                        if open_wb.FullName.lower() == fpath.lower():
+                            wb = open_wb
+                            is_already_open = True
+                            break
+                except Exception:
+                    pass
+
+                if not wb:
+                    wb = safe_com_call(lambda: excel_app.Workbooks.Open(fpath, 0, False))
+
+                ws = None
+                try:
+                    ws = safe_com_call(lambda: wb.Sheets("一覽表"))
+                except Exception:
+                    try:
+                        sheet_count = safe_com_call(lambda: wb.Sheets.Count)
+                        for idx in range(1, sheet_count + 1):
+                            s = safe_com_call(lambda: wb.Sheets(idx))
+                            if s.Name == "一覽表":
+                                ws = s
+                                break
+                    except Exception:
+                        pass
+
+                if ws:
+                    com_tickers = extract_tickers_from_sheet(ws)
+                    tickers.update(com_tickers)
+                    logger.info(f"  ├─ (COM 備援) 成功自 {fname} 讀取 {len(com_tickers)} 支股票代號")
+            except Exception as e:
+                logger.warning(f"讀取 {fname} 股票代號時發生錯誤: {e}")
+            finally:
+                if wb and not is_already_open:
+                    safe_close_wb(wb, False)
+
     return sorted(list(tickers))
 
 def main():
@@ -498,20 +567,21 @@ def main():
                 logger.info("[提示] 輸入非數字，自動選擇更新全部檔案。")
                 selected_files = target_files
 
-    logger.info("[步驟 1/2] 正在收集目標股票代號並向證交所 API 查詢收盤數據...")
-    all_tickers = collect_all_tickers(selected_files)
-    logger.info(f"  ├─ 需查詢的股票代號 ({len(all_tickers)} 支): {', '.join(all_tickers)}")
-    
-    start_time = time.time()
-    stock_data = fetch_stock_data(all_tickers)
-    elapsed = time.time() - start_time
-    logger.info(f"  └─ API 數據抓取完成！耗時: {elapsed:.2f} 秒")
-
     excel_app = None
     is_newly_created = False
 
     try:
         excel_app, is_newly_created = get_excel_app()
+
+        logger.info("[步驟 1/2] 正在收集目標股票代號並向證交所 API 查詢收盤數據...")
+        all_tickers = collect_all_tickers(selected_files, excel_app=excel_app)
+        logger.info(f"  ├─ 需查詢的股票代號 ({len(all_tickers)} 支): {', '.join(all_tickers)}")
+        
+        start_time = time.time()
+        stock_data = fetch_stock_data(all_tickers)
+        elapsed = time.time() - start_time
+        logger.info(f"  └─ API 數據抓取完成！耗時: {elapsed:.2f} 秒")
+
         logger.info("[步驟 2/2] 正在經由 Excel 原生引擎寫入儲存格 (100% 原生保留圖片與公式)...")
         success_count = 0
         for fpath in selected_files:

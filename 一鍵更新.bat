@@ -1,6 +1,6 @@
 @echo off
 chcp 65001 >nul
-title 台灣股票收盤價 Excel 自動更新工具 v1.0.2
+title 台灣股票收盤價 Excel 自動更新工具 v1.0.3
 cd /d "%~dp0"
 
 python update_stocks.py %*
