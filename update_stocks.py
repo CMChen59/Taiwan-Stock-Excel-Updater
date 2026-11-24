@@ -21,7 +21,7 @@ import win32com.client
 import win32com.client.gencache
 import win32com.client.dynamic
 
-VERSION = "v1.0.3"
+VERSION = "v1.0.4"
 
 if getattr(sys, 'frozen', False):
     SCRIPT_DIR = os.path.dirname(sys.executable)
@@ -108,7 +108,7 @@ def fetch_stock_data(tickers):
         channels.append(f"tse_{t_clean}.tw")
         channels.append(f"otc_{t_clean}.tw")
     
-    url = f"https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch={'|'.join(channels)}"
+    url = f"https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch={'%7C'.join(channels)}&json=1&delay=0"
     logger.info(f"發送證交所 API 請求: {url}")
     
     req = urllib.request.Request(
@@ -116,58 +116,66 @@ def fetch_stock_data(tickers):
         headers={
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Accept': 'application/json, text/javascript, */*; q=0.01',
+            'Referer': 'https://mis.twse.com.tw/stock/fibest.jsp',
         }
     )
     
     stock_dict = {}
     ssl_context = ssl._create_unverified_context()
-    try:
-        with urllib.request.urlopen(req, timeout=10, context=ssl_context) as response:
-            content = response.read().decode('utf-8')
-            data = json.loads(content)
-            
-            if 'msgArray' in data:
-                for item in data['msgArray']:
-                    code = item.get('c', '').strip()
-                    if not code:
-                        continue
-                    
-                    def safe_float(val):
-                        try:
-                            if val and val != '--':
-                                return float(val)
-                        except (ValueError, TypeError):
-                            pass
-                        return None
+    max_api_retries = 3
+    for attempt in range(max_api_retries):
+        try:
+            with urllib.request.urlopen(req, timeout=10, context=ssl_context) as response:
+                content = response.read().decode('utf-8')
+                data = json.loads(content)
+                
+                if 'msgArray' in data:
+                    for item in data['msgArray']:
+                        code = item.get('c', '').strip()
+                        if not code:
+                            continue
+                        
+                        def safe_float(val):
+                            try:
+                                if val and val != '--':
+                                    return float(val)
+                            except (ValueError, TypeError):
+                                pass
+                            return None
 
-                    def safe_int(val):
-                        try:
-                            if val and val != '--':
-                                return int(str(val).replace(',', ''))
-                        except (ValueError, TypeError):
-                            pass
-                        return None
+                        def safe_int(val):
+                            try:
+                                if val and val != '--':
+                                    return int(str(val).replace(',', ''))
+                            except (ValueError, TypeError):
+                                pass
+                            return None
 
-                    price = safe_float(item.get('z'))
-                    prev_close = safe_float(item.get('y'))
-                    open_price = safe_float(item.get('o'))
-                    high_price = safe_float(item.get('h'))
-                    low_price = safe_float(item.get('l'))
-                    volume_lots = safe_int(item.get('v'))
+                        price = safe_float(item.get('z'))
+                        prev_close = safe_float(item.get('y'))
+                        open_price = safe_float(item.get('o'))
+                        high_price = safe_float(item.get('h'))
+                        low_price = safe_float(item.get('l'))
+                        volume_lots = safe_int(item.get('v'))
 
-                    if code not in stock_dict or price is not None:
-                        stock_dict[code] = {
-                            'name': item.get('n', ''),
-                            'price': price,
-                            'prev_close': prev_close,
-                            'open': open_price,
-                            'high': high_price,
-                            'low': low_price,
-                            'volume_lots': volume_lots
-                        }
-    except Exception as e:
-        logger.error(f"抓取證交所 API 時發生例外異常: {e}")
-        logger.error(traceback.format_exc())
+                        if code not in stock_dict or price is not None:
+                            stock_dict[code] = {
+                                'name': item.get('n', ''),
+                                'price': price,
+                                'prev_close': prev_close,
+                                'open': open_price,
+                                'high': high_price,
+                                'low': low_price,
+                                'volume_lots': volume_lots
+                            }
+            break
+        except Exception as e:
+            if attempt < max_api_retries - 1:
+                logger.warning(f"證交所 API 連線異常 ({e})，正在進行第 {attempt + 2} 次重試...")
+                time.sleep(0.5)
+            else:
+                logger.error(f"抓取證交所 API 時發生例外異常: {e}")
+                logger.error(traceback.format_exc())
 
     missing_tickers = [t for t in tickers if t not in stock_dict or stock_dict[t]['price'] is None]
     if missing_tickers:
